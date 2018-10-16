@@ -1,11 +1,68 @@
-﻿[CmdletBinding()]
+﻿<#
+.SYNOPSIS
+   The New-WimImage.ps1 script will create a customized .wim image patched with the latest OS cumulative update and containing all versions of Microsoft C++ redistributables, Silverlight and .NET Framework 4.7.2. If a list of AppxProvisioned packages is supplied, these packages will be removed from the .wim file.
+.DESCRIPTION
+   The New-WimImage.ps1 script will create a customized .wim image patched with the latest OS cumulative update and containing a pre-determined list of applications.
+
+    Script prerequisites:
+    Hyper-V is installed
+    Latest version of Windows ADK installed
+
+    Applications and packages installed during the task sequence:
+    Microsoft C++ redistributables, x86 and x64 versions from 2005 to 2017
+    Microsoft Silverlight
+    Microsoft .NET Framework 4.7.2
+    Latest cumulative update for the operating system being deployed
+
+    If a list of AppxProvisionedPackages is provided in the config folder, the script will mount the customized .wim and remove all listed packages from the .wim
+
+    Applications and cumulative update will be downloaded if they are not found in the media location folder.
+    Aaron Parker's LatestUpdate module is used to locate and download the most recent cumulative update, the script will download and install this module from the PSGallery if it is not already installed.
+    
+    
+    The following actions are carried out on the MDT server:
+    MDT deployment share is created
+    Operating system is imported
+    Applications are imported
+    Latest OS cumulative update is imported
+    Task sequence is created
+    Bootstrap.ini file is updated to use a static IP address and local user account when connecting to the deployment share
+    Customsettings.ini file is updated to make all the imported applications mandatory deployments during the task sequence
+
+    Other actions carried out by the script are:
+    Creating a local user account to use when connecting to the MDT deployment share
+    Creating a Hyper-V virtual machine to capture the image on
+    Using MDT boot media to connect to MDT deployment share and deploy task sequence
+    The task sequence installs the operating system, cumulative update, features and applications
+    It then syspreps the virtual machine, generates a .wim file and shuts the virtual machine down
+    The virtual machine and local user account are deleted once the .wim file is captured
+
+    If an AppsToRemove.txt file is found in the Config folder:
+    The captured .wim file is mounted and the list of AppxProvisionedPackages in the text file are removed
+
+
+.EXAMPLE
+    New-WimImage -Verbose
+
+    This command uses the default parameters to create a .wim image file in the C:\MDT-Capture folder using a .iso file, applications and cumulative update from the C:\Media folder
+.EXAMPLE
+    New-WimImage -MediaLocation C:\Temp -MDTDeploymentShare F:\MDT-ReferenceImage
+
+    This command creates a .wim image file in the F:\MDT-ReferenceImage folder using a .iso file, applications and cumulative update from the C:\Temp folder
+.EXAMPLE
+    New-WinImage -DoNotCreateVM
+
+    This command tells the script to only create the deployment share and boot media.
+#>
+
+[CmdletBinding()]
 param(
     [string]$MDTServer = $env:COMPUTERNAME,
         
-    [string]$MDTDeploymentShare = 'F:\MDT-Capture',
+    [string]$MDTDeploymentShare = 'C:\MDT-Capture',
         
-    [ValidateScript({Test-Path -Path $_})]
-    [string]$MediaLocation = 'F:\Media',
+    [ValidateScript({Get-ChildItem -Path $_ -Recurse -Include *.iso})]
+    [string]$MediaLocation = 'C:\Media',
 
     [string]$OperatingSystemName = 'Windows 10',
 
@@ -14,7 +71,6 @@ param(
     [switch]$DoNotCreateVM
     )
 
-$timer = [system.diagnostics.stopwatch]::StartNew()
 # Is script running with administrator rights?
 If (-not([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")){
     Write-Warning 'This script must be run from an elevated PowerShell session'
@@ -31,6 +87,7 @@ Else{
     Break
 }
 
+$timer = [system.diagnostics.stopwatch]::StartNew()
 $Summary = @("`nScript summary`n--------------")
 
 # Dot source helper scripts
@@ -49,24 +106,18 @@ Get-ChildItem -Path $moduleLibPath -Include *.ps1 -Recurse |
 # Select .wim file to import for task sequence
 Write-Verbose 'Mounting .iso file'
 $ISOSource = Get-ChildItem -Path $medialocation -Include '*.iso' -Recurse
-If($ISOSource){
-    If($ISOSource.count -gt 1){
-        for($i=0;$i -lt $ISOSource.Count;$i++){
-            "$($i+1)`t$($ISOSource[$i].PSChildName)"
-        }
-        Do{
-            [int]$ISOFile = Read-Host "`nFound more than one .iso file in $MediaLocation, please select which one you wish to open" 
-        }
-        While(1..$ISOSource.count -notcontains $ISOFile)
-        $ISOSource = $ISOSource[($ISOFile-1)]
-        Write-Verbose "$ISOSource has been chosen"
+If($ISOSource.count -gt 1){
+    for($i=0;$i -lt $ISOSource.Count;$i++){
+        "$($i+1)`t$($ISOSource[$i].PSChildName)"
     }
-    Mount-ISO -ISOSource $ISOSource
+    Do{
+        [int]$ISOFile = Read-Host "`nFound more than one .iso file in $MediaLocation, please select which one you wish to open" 
+    }
+    While(1..$ISOSource.count -notcontains $ISOFile)
+    $ISOSource = $ISOSource[($ISOFile-1)]
+    Write-Verbose "$ISOSource has been chosen"
 }
-Else{
-    Write-Warning "Unable to find any .iso files in $MediaLocation`n`nPlease place your .iso file into the $MediaLocation folder and run the script again."
-    Break
-}
+Mount-ISO -ISOSource $ISOSource
 
 # Select operating system image
 $images = Get-WindowsImage -ImagePath "$FileSource\sources\install.wim"
@@ -97,6 +148,9 @@ Prepare-Applications -Verbose
 Write-Verbose 'Downloading latest cumulative update'
 Prepare-Updates -Verbose
 
+# Create MDT-Capture local account
+Create-LocalUser -LocalUserName 'MDT-Capture' -LocalUserPassword 'Pa55word'
+
 # Create deployment share
 If(Test-Path $MDTDeploymentShare){
     Write-Verbose "Found an existing deployment share at $MDTDeploymentShare, this will now be removed"
@@ -104,11 +158,11 @@ If(Test-Path $MDTDeploymentShare){
     Write-Verbose "$MDTDeploymentShare has been removed"
 }
 New-Item -Path $MDTDeploymentShare -ItemType Directory | Out-Null
-Write-Verbose "New deployment share created at $MDTDeploymentShare"
-If(-not(Get-SmbShare | where {$_.Path -eq $MDTDeploymentShare})){
-    $MDTShare = New-SmbShare -Name "$($MDTDeploymentShare.Split('\')[1])$" -Path $MDTDeploymentShare -FullAccess Administrators -ChangeAccess Everyone
-}
 $MDTShareName = $MDTDeploymentShare.Split('\')[1] + '$'
+If(-not(Get-SmbShare | where {$_.Path -eq $MDTDeploymentShare})){
+    $MDTShare = New-SmbShare -Name $MDTShareName -Path $MDTDeploymentShare -FullAccess Administrators -ChangeAccess Everyone
+}
+Write-Verbose "New deployment share created at $MDTDeploymentShare, shared as $MDTShareName"
 
 # Import module and create PSDrive
 Import-Module "$MDTInstallDir\MicrosoftDeploymentToolkit.psd1"
@@ -118,11 +172,7 @@ If(Get-PSDrive | where {$_.Name -eq $DSName}){
                  Force = $true}
     Remove-PSDrive @PSDrive
 }
- 
 New-PSDrive -Name $DSName -PSProvider MDTProvider -Root $MDTDeploymentShare -Description "MDT Reference Image" -NetworkPath "\\$MDTServer\$MDTShareName" -Verbose | Add-MDTPersistentDrive -Verbose
-
-# Create MDT-Capture local account
-Create-LocalUser -LocalUserName 'MDT-Capture' -LocalUserPassword 'Pa55word'
 
 # Set permissions on the deployment share
 $SID = (Get-LocalUser -Name $MDTUserName).SID
@@ -131,7 +181,7 @@ icacls $MDTDeploymentShare /grant '"Administrators":(OI)(CI)(F)'
 icacls $MDTDeploymentShare /grant '"SYSTEM":(OI)(CI)(F)'
 icacls $MDTDeploymentShare\Captures /grant ""*$($SID)":(OI)(CI)(M)"
 
-# Create base folder structure
+# Create folder to import the operating system into
 New-Item -path "$($DSName):\Operating Systems" -enable "True" -Name "$OperatingSystemName-$OperatingSystemVersion" -Comments "$OperatingSystemName-$OperatingSystemVersion" -ItemType "folder" -Verbose
 
 # Import operating system
@@ -148,8 +198,8 @@ If(Get-Item -Path "$MediaLocation\Updates\*" -Include *.msu,*.cab -ErrorAction S
 }
 
 # Create a reference image task sequence
-$WIMFile = (Get-Item -Path "$($DSName):\Operating Systems\$OperatingSystemName-$OperatingSystemVersion\*").Name
 Import-MDTTaskSequence -path "$($DSName):\Task Sequences" -Name "$OperatingSystemName $OperatingSystemVersion Reference image" -Template "Client.xml" -Version "1.0" -OperatingSystemPath "$($DSName):\Operating Systems\$OperatingSystemName-$OperatingSystemVersion\$TSWim" -Comments "$OperatingSystemName $OperatingSystemVersion reference image" -ID "RefImg" -Verbose
+
 # Create application folders and import applications
 $Applications = Get-ChildItem -Path "$MediaLocation\Applications"
 foreach($folder in $Applications){
