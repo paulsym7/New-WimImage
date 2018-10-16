@@ -7,12 +7,11 @@
     [CmdletBinding()]
     param()
     
-    $AppsFoler = "$MediaLocation\Applications"
-    If(-not(Test-Path $AppsFoler)){
-        New-Item -Path $AppsFoler -ItemType Directory | Out-Null
+    $AppsFolder = "$MediaLocation\Applications"
+    If(-not(Test-Path $AppsFolder)){
+        New-Item -Path $AppsFolder -ItemType Directory | Out-Null
     }
 
-    # Applications: C++ 2005, 2008, 2010, 2012, 2013, 2015, 2017, Silverlight, .NET Framework 4.7.2
     $AppHashTable = @{'2005x64' = 'https://download.microsoft.com/download/d/3/4/d342efa6-3266-4157-a2ec-5174867be706/vcredist_x86.exe'
                       '2005x86' = 'https://download.microsoft.com/download/d/4/1/d41aca8a-faa5-49a7-a5f2-ea0aa4587da0/vcredist_x64.exe'
                       '2008x64' = 'https://download.microsoft.com/download/d/d/9/dd9a82d0-52ef-40db-8dab-795376989c03/vcredist_x86.exe'
@@ -31,14 +30,14 @@
                       'NETFramework472' = 'http://go.microsoft.com/fwlink/?linkid=863265'}
 
     foreach($Application in $AppHashTable.Keys){
-        If(-not(Test-Path $AppsFoler\$Application)){
+        If(-not(Test-Path $AppsFolder\$Application)){
             Write-Verbose "Creating a folder for $Application"
-            New-Item -Path $AppsFoler\$Application -ItemType Directory | Out-Null
+            New-Item -Path $AppsFolder\$Application -ItemType Directory | Out-Null
         }
-        If(-not(Get-Item -Path $AppsFoler\$Application\*.exe)){
-            Write-Verbose "No executable found in the $Application folder, will attempt to download"
+        If(-not(Get-Item -Path $AppsFolder\$Application\$Application.exe -ErrorAction SilentlyContinue)){
+            Write-Verbose "No $Application.exe file found in the $Application folder, will download it from $($AppHashTable.Application)"
             $URL = $AppHashTable.$Application
-            $Path = "$AppsFoler\$Application\$Application.exe"
+            $Path = "$AppsFolder\$Application\$Application.exe"
             Download-File -URL $URL -Path $Path -Verbose
         }
     }
