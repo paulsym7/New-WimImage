@@ -12,7 +12,9 @@
         $Action = 'Mount'
     )
 
-    $MountParams = @{ImagePath = $ISOSource.FullName; PassThru = $true; ErrorAction = 'Ignore'}
+    $MountParams = @{ImagePath = $ISOSource.FullName
+                     PassThru = $true
+                     ErrorAction = 'Ignore'}
     If($Action -eq 'Mount'){
         $Mount = Mount-DiskImage @MountParams
         $Volume = Get-DiskImage -ImagePath $mount.ImagePath | Get-Volume

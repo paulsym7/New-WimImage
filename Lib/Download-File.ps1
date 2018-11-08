@@ -11,7 +11,6 @@
         [string]$Path
     )
 
-    Write-Verbose "Downloading $Application from $URL`nSaving as $Path"
     $WebClient = New-Object System.Net.WebClient
     $WebClient.DownloadFile($URL,$Path)
 }

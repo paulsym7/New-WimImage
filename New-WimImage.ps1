@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-   The New-WimImage.ps1 script will create a customized .wim image patched with the latest OS cumulative update and containing all versions of Microsoft C++ redistributables, Silverlight and .NET Framework 4.7.2. If a list of AppxProvisioned packages is supplied, these packages will be removed from the .wim file.
+   The New-WimImage.ps1 script will create a customized .wim image patched with the latest OS cumulative update and containing a pre-determined list of applications. If a list of AppxProvisioned packages is supplied, these packages will be removed from the .wim file.
 .DESCRIPTION
    The New-WimImage.ps1 script will create a customized .wim image patched with the latest OS cumulative update and containing a pre-determined list of applications.
 
@@ -8,37 +8,20 @@
     Hyper-V is installed
     Latest version of Windows ADK installed
 
-    Applications and packages installed during the task sequence:
-    Microsoft C++ redistributables, x86 and x64 versions from 2005 to 2017
-    Microsoft Silverlight
-    Microsoft .NET Framework 4.7.2
-    Latest cumulative update for the operating system being deployed
-
-    If a list of AppxProvisionedPackages is provided in the config folder, the script will mount the customized .wim and remove all listed packages from the .wim
-
-    Applications and cumulative update will be downloaded if they are not found in the media location folder.
-    Aaron Parker's LatestUpdate module is used to locate and download the most recent cumulative update, the script will download and install this module from the PSGallery if it is not already installed.
+    Applications, Windows features and updates:
+    If an AppsToInstall.csv file is placed in the config folder, the script will install these applications during the task sequence.
+    Note, the application must have a silent install switch and the script currently only supports .exe files
     
+    Applications not found in the media location folder will be downloaded using the URL provided in the AppsToInstall.csv file.
     
-    The following actions are carried out on the MDT server:
-    MDT deployment share is created
-    Operating system is imported
-    Applications are imported
-    Latest OS cumulative update is imported
-    Task sequence is created
-    Bootstrap.ini file is updated to use a static IP address and local user account when connecting to the deployment share
-    Customsettings.ini file is updated to make all the imported applications mandatory deployments during the task sequence
+    If an AppsToRemove.txt file is placed in the config folder, the script will mount the customized .wim and remove all listed packages from the .wim
+    Use the (Get-AppxProvisionedPackage -Online).DisplayName command to discover the correct name format for packages to remove.
 
-    Other actions carried out by the script are:
-    Creating a local user account to use when connecting to the MDT deployment share
-    Creating a Hyper-V virtual machine to capture the image on
-    Using MDT boot media to connect to MDT deployment share and deploy task sequence
-    The task sequence installs the operating system, cumulative update, features and applications
-    It then syspreps the virtual machine, generates a .wim file and shuts the virtual machine down
-    The virtual machine and local user account are deleted once the .wim file is captured
+    If an OSFeatures.txt file is placed in the config folder, the script will install all features listed in the file.
+    Use the (Get-WindowsOptionalFeature -Online).FeatureName command to discover the correct name format for the Windows features. 
 
-    If an AppsToRemove.txt file is found in the Config folder:
-    The captured .wim file is mounted and the list of AppxProvisionedPackages in the text file are removed
+    Aaron Parker's LatestUpdate module is used to locate and download the most recent cumulative update.
+    The script will download and install this module from the PSGallery if it is not already installed.
 
 
 .EXAMPLE
@@ -57,25 +40,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$MDTServer = $env:COMPUTERNAME,
-        
     [string]$MDTDeploymentShare = 'C:\MDT-Capture',
         
     [ValidateScript({Get-ChildItem -Path $_ -Recurse -Include *.iso})]
-    [string]$MediaLocation = 'C:\Media',
-
-    [string]$OperatingSystemName = 'Windows 10',
-
-    [string[]]$OperatingSystemFeatures = 'NetFx3',
-
-    [switch]$DoNotCreateVM
+    [string]$MediaLocation = 'C:\Media'
     )
 
-# Is script running with administrator rights?
-If (-not([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")){
-    Write-Warning 'This script must be run from an elevated PowerShell session'
-    Break
-}
+#Requires -RunAsAdministrator
 
 # Is MDT workbench installed?
 $MDTInstallDir = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Deployment 4').Install_Dir + 'Bin'
@@ -89,6 +60,8 @@ Else{
 
 $timer = [system.diagnostics.stopwatch]::StartNew()
 $Summary = @("`nScript summary`n--------------")
+$MDTServer = $env:COMPUTERNAME
+$OperatingSystemName = 'Windows 10'
 
 # Dot source helper scripts
 $moduleRoot = Split-Path -Path $MyInvocation.MyCommand.Path -Parent
@@ -135,14 +108,15 @@ If($images.Count -gt 1){
     Write-Verbose "Creating a $($ISOImage.ImageName) reference image"
 }
 
-If($PSBoundParameters.Keys -notcontains 'DoNotCreateVM'){
-    # Create VM to be used as capture machine
-    Configure-VM -Prepare -Verbose
-}
+# Create VM to be used as capture machine
+Configure-VM -Prepare -Verbose
 
 # Verify applications are downloaded
-Write-Verbose 'Checking all required applications are present'
-Prepare-Applications -Verbose
+If(Test-Path $ConfigPath\AppsToInstall.csv){
+    Write-Verbose 'Checking all required applications are present'
+    $Applications = Import-Csv -Path $ConfigPath\AppsToInstall.csv
+    Prepare-Applications -Verbose
+}
 
 # Verify latest cumulative update is downloaded
 Write-Verbose 'Downloading latest cumulative update'
@@ -200,27 +174,20 @@ If(Get-Item -Path "$MediaLocation\Updates\*" -Include *.msu,*.cab -ErrorAction S
 # Create a reference image task sequence
 Import-MDTTaskSequence -path "$($DSName):\Task Sequences" -Name "$OperatingSystemName $OperatingSystemVersion Reference image" -Template "Client.xml" -Version "1.0" -OperatingSystemPath "$($DSName):\Operating Systems\$OperatingSystemName-$OperatingSystemVersion\$TSWim" -Comments "$OperatingSystemName $OperatingSystemVersion reference image" -ID "RefImg" -Verbose
 
-# Create application folders and import applications
-$Applications = Get-ChildItem -Path "$MediaLocation\Applications"
-foreach($folder in $Applications){
-    $AppVersion = $folder.Name.Replace('x',' x')
-    $SourcePath = $Folder.FullName
-    $ExecutableName = $folder.EnumerateFiles().Name
-    If($AppVersion.Split(' ')[0] -lt '2010' -or $AppVersion.Split(' ')[0] -eq 'Silverlight'){
-        $AppCommandLine = "$ExecutableName /Q"
-    }
-    Else{
-        $AppCommandLine = "$ExecutableName /quiet /norestart"
-    }
-    Import-MDTApplication -path "$($DSName):\Applications" -enable "True" -Name "$folder" -ShortName "$folder" -Version "" -Publisher "Microsoft" -Language "" -CommandLine "$AppCommandLine" -WorkingDirectory ".\Applications\$Folder" -ApplicationSourcePath $SourcePath -DestinationFolder "$Folder" -Verbose
+# Import applications
+foreach($app in $Applications){
+    $Path = (Get-ChildItem -Path "$MediaLocation\Applications\$($app.Name)")
+    $SourcePath = $Path.Directory
+    $ExecutableName = Split-Path $Path.FullName -Leaf
+    $AppCommandLine = $ExecutableName + ' ' + $app.Silent
+    Import-MDTApplication -path "$($DSName):\Applications" -enable "True" -Name $app.FullName -ShortName $app.Name -Publisher "Microsoft" -Language "" -CommandLine "$AppCommandLine" -WorkingDirectory ".\Applications\$($app.Name)" -ApplicationSourcePath $SourcePath -DestinationFolder $app.Name -Verbose
 }
 
 Write-Output 'Generating bootstrap.ini and customsettings.ini'
 # Generate bootstrap.ini and customsettings.ini
-# MAC Address section not needed if VM not being created
-If($PSBoundParameters.Keys -notcontains 'DoNotCreateVM'){
-    $Priority = 'MACAddress,Default'
-    $IPSettings = @"
+$Bootstrap = @"
+[Settings]
+Priority=MACAddress,Default
 
 [$MACAddress]
 OSDAdapter0EnableDHCP=FALSE
@@ -228,17 +195,6 @@ OSDAdapterCount=1
 OSDAdapter0IPAddressList=$VMIPAddress
 OSDAdapter0SubnetMask=$SubnetMask
 
-"@
-}
-Else{
-    $Priority = 'Default'
-    $IPSettings = $null
-}
-
-$Bootstrap = @"
-[Settings]
-Priority=$Priority
-$IPSettings
 [Default]
 DeployRoot=\\$MDTServer\$MDTShareName
 UserDomain=$MDTServer
@@ -251,8 +207,8 @@ SkipBDDWelcome=YES
 
 $CSini = @"
 [Settings]
-Priority=$Priority
-$IPSettings
+Priority=Default
+
 [Default]
 _SMSTSOrgName=Running $OperatingSystemName Reference Image Capture
 _SMSTSPackageName=$OperatingSystemName v$OperatingSystemVersion
@@ -290,8 +246,14 @@ BackupDir=Captures
 BackupFile=$($OperatingSystemName.Replace(' ',''))-$OperatingSystemVersion-#day(date) & "-" & month(date) & "-" & year(date)#.wim
 SkipFinalSummary=YES
 FinishAction=SHUTDOWN
-OSFeatures=$OperatingSystemFeatures
 "@ | Out-File "$MDTDeploymentShare\Control\CustomSettings.ini" -Encoding ascii
+
+# Add OS features
+If(Test-Path -Path $ConfigPath\OSFeatures.txt){
+    $OSFeatures = Get-Content -Path $ConfigPath\OSFeatures.txt
+    $FeatureList = $OSFeatures -join ','
+    "`rOSFeatures=$FeatureList" | Out-File -FilePath "$MDTDeploymentShare\Control\CustomSettings.ini" -Encoding ascii -Append
+}
 
 # Add applications to customsettings as mandatory applications
 $appxml = Get-Item -Path "$MDTDeploymentShare\Control\Applications.xml"
@@ -319,7 +281,6 @@ If(-not(Test-Path $MDTDeploymentShare\Control\Settings.xml)){
     Stop-Process -Name 'mmc'
 }
 [xml]$Settings = Get-Content -Path $MDTDeploymentShare\Control\Settings.xml
-#$Settings.Settings.SupportX64 = 'False'
 $Settings.Settings.'Boot.x64.FeaturePacks' = ''
 $Settings.Settings.'Boot.x64.SelectionProfile' = 'Nothing'
 $Settings.Settings.'Boot.x86.FeaturePacks' = ''
@@ -336,33 +297,31 @@ do{
 until (Get-Item -Path $MDTDeploymentShare\Boot\*iso)
 Write-Output 'Deployment share and boot media have been created'
 
-If($PSBoundParameters.Keys -notcontains 'DoNotCreateVM'){
-    # Add .iso to virtual machine DVD drive and start the VM
-    Set-VMDvdDrive -VMName $VMName -Path (Get-Item -Path $MDTDeploymentShare\Boot\LiteTouchPE_x86.iso)
-    Start-VM -VMName $VMName
-    Write-Output 'Creating reference image'
-    # Wait until .wim file is generated
-    do{
-        Write-Progress -Activity 'Generating reference image on virtual machine' -PercentComplete -1
-        Start-Sleep -Seconds 20
+# Add .iso to virtual machine DVD drive and start the VM
+Set-VMDvdDrive -VMName $VMName -Path (Get-Item -Path $MDTDeploymentShare\Boot\LiteTouchPE_x86.iso)
+Start-VM -VMName $VMName
+Write-Output 'Creating reference image'
+# Wait until .wim file is generated
+do{
+    Write-Progress -Activity 'Generating reference image on virtual machine' -PercentComplete -1
+    Start-Sleep -Seconds 20
+}
+until((Get-VM -Name $VMName).State -eq 'Off')
+Write-Progress -Activity 'Generating reference image on virtual machine' -Completed
+Configure-VM -CleanUp -Verbose
+Remove-LocalUser -Name $MDTUserName
+Write-Verbose "Local user account $MDTUserName has been removed"
+If(Test-Path $MDTDeploymentShare\Captures\*.wim){
+    $Summary += "Customized .wim file created"
+    # Mount wim file, remove appx packages
+    If(Test-Path $ConfigPath\AppsToRemove.txt){
+        Write-Output 'Reference image has now been created, AppxProvisioned packages will now be removed'
+        Remove-AppXPackagesFromWim -WimFile (Get-Item -Path $MDTDeploymentShare\Captures\*.wim).FullName -AppsToRemove "$ConfigPath\AppsToRemove.txt" -MountPath "$MediaLocation\OfflineWim" -Index 1 -LogFile "$MediaLocation\Remove-AppxPackages.log" -Verbose
+        $Summary += "AppxProvisioned packages removed from .wim file"
     }
-    until((Get-VM -Name $VMName).State -eq 'Off')
-    Write-Progress -Activity 'Generating reference image on virtual machine' -Completed
-    Configure-VM -CleanUp -Verbose
-    Remove-LocalUser -Name $MDTUserName
-    Write-Verbose "Local user account $MDTUserName has been removed"
-    If(Test-Path $MDTDeploymentShare\Captures\*.wim){
-        $Summary += "Customized .wim file created"
-        # Mount wim file, remove appx packages
-        If(Test-Path $ConfigPath\AppsToRemove.txt){
-            Write-Output 'Reference image has now been created, AppxProvisioned packages will now be removed'
-            Remove-AppXPackagesFromWim -WimFile (Get-Item -Path $MDTDeploymentShare\Captures\*.wim).FullName -AppsToRemove "$ConfigPath\AppsToRemove.txt" -MountPath "$MediaLocation\OfflineWim" -Index 1 -LogFile "$MediaLocation\Remove-AppxPackages.log" -Verbose
-            $Summary += "AppxProvisioned packages removed from .wim file"
-        }
-    }
-    Else{
-        Write-Warning 'Unable to locate a .wim file to mount'
-    }
+}
+Else{
+    Write-Warning 'Unable to locate a .wim file to mount'
 }
 
 $timer.Stop()

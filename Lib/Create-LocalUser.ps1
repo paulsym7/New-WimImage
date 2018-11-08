@@ -6,11 +6,11 @@
 
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory,ValueFromPipelineByPropertyName)]
+        [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
         [string]$LocalUserName,
 
-        [Parameter(Mandatory,ValueFromPipelineByPropertyName)]
+        [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
         [string]$LocalUserPassword
     )
@@ -21,7 +21,8 @@
         Get-LocalUser -Name $LocalUserName -ErrorAction Stop | Out-Null
         Write-Verbose "Local account $LocalUserName already exists"
         $Random = Get-Random -Minimum 1 -Maximum 99
-        Create-LocalUser -LocalUserName ($LocalUserName + $Random) -LocalUserPassword $Password
+        $LocalUserName = $LocalUserName + $Random
+        Create-LocalUser -LocalUserName $LocalUserName -LocalUserPassword $LocalUserPassword
     }
     catch{
         New-LocalUser -Name $LocalUserName -Password $Password | Out-Null
