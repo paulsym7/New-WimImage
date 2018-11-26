@@ -176,7 +176,7 @@ Import-MDTTaskSequence -path "$($DSName):\Task Sequences" -Name "$OperatingSyste
 
 # Import applications
 foreach($app in $Applications){
-    $Path = (Get-ChildItem -Path "$MediaLocation\Applications\$($app.Name)")
+    $Path = Get-ChildItem -Path "$MediaLocation\Applications\$($app.Name)\*" -Include *.exe
     $SourcePath = $Path.Directory
     $ExecutableName = Split-Path $Path.FullName -Leaf
     $AppCommandLine = $ExecutableName + ' ' + $app.Silent
